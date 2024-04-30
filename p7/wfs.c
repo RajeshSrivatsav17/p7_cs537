@@ -139,6 +139,9 @@ static int wfs_getattr(const char *path, struct stat *stbuf) {
         stbuf->st_mtime = inode.mtim;
         stbuf->st_ctime = inode.ctim;
         stbuf->st_atime = inode.atim;
+        stbuf->st_ino   = inode.num;
+        stbuf->st_size  = inode.size;
+
         munmap(mmap_file, st.st_size);
         
         return ret;
@@ -184,8 +187,11 @@ static int wfs_getattr(const char *path, struct stat *stbuf) {
     stbuf->st_mtime = inode.mtim;
     stbuf->st_ctime = inode.ctim;
     stbuf->st_atime = inode.atim;
+    stbuf->st_ino   = inode.num;
+    stbuf->st_size  = inode.size;
+
     munmap(mmap_file, st.st_size);
-    
+
     return ret;
 }
 
