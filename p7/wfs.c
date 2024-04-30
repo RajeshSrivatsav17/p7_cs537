@@ -30,7 +30,7 @@ int find_free_inode() {
     for (int i = 0; i < sb.num_inodes / 8; i++) {
         memcpy(&inodeMap, mmap_file + i * sizeof(int), sizeof(int));
         printf("inode bitmap = %x\n", inodeMap);
-        for (int j = 0; j < sizeof(int) * 8; j++) { 
+        for (int j = (sizeof(int) * 8 )-1; j >0 ; j--) { 
             if (!(inodeMap & (1 << j))) { 
                 inode_num = i * sizeof(int) * 8 + j; 
                 inodeMap |= 1 << j;
@@ -151,6 +151,7 @@ static int wfs_getattr(const char *path, struct stat *stbuf) {
 
     while (token != NULL) {
         // Traverse through the root inode and find out if there are any data block directory entry with the matching name
+        printInode(&inode);
         found = 0;
         for(int i=0; i<N_BLOCKS; i++){
             if(inode.blocks[i] == 0) continue;
@@ -196,7 +197,106 @@ static int wfs_getattr(const char *path, struct stat *stbuf) {
 }
 
 static int wfs_mknod(const char* path, mode_t mode, dev_t rdev) {
-    return 5;
+    int ret = 0;
+    struct stat st;
+    char *mmap_file;
+    struct wfs_sb sb;
+    struct wfs_inode inode;
+    struct wfs_dentry de;
+    int next_inode = 0;
+    // int inode_num;
+    char *token = strtok(strdup(path), "/");
+    //token = strtok(NULL, "/"); // Ignore mnt/
+
+    char * file_name = token;
+    printf("directory is : %s\n", file_name);
+    while(token != NULL){
+        file_name = token;
+        // Get the next token
+        token = strtok(NULL, "/");
+    }
+
+    token = strtok(strdup(path), "/");
+    printf("token is : %s directory is %s\n", token, file_name);
+
+    int fd = open(disk_img, O_RDWR);
+    fstat(fd, &st);
+    mmap_file = (char *) mmap(NULL, st.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+    memcpy(&sb, mmap_file, sizeof(struct wfs_sb));
+    // we got the root inode. Now we have to get the data blocks of the root inode
+
+    memcpy(&inode, mmap_file + sb.i_blocks_ptr + 0*BLOCK_SIZE, sizeof(struct wfs_inode));
+    printInode(&inode);
+    while ((strcmp(token, file_name) != 0) && (token != NULL)) {
+        // Traverse through the root inode and find out if there are any data block directory entry with the matching name
+        for(int b=0; b<(BLOCK_SIZE/sizeof(de));b++){
+            memcpy(&de, mmap_file + inode.blocks[0] + b *sizeof(de), sizeof(struct wfs_dentry));
+            printf("de.name : %s de.num : %d\n", de.name, de.num);
+
+            if(strcmp(de.name, token) == 0){
+                // inside next directory 
+                next_inode = de.num;
+                break;
+            }
+        }
+        memcpy(&inode, mmap_file + sb.i_blocks_ptr + next_inode*BLOCK_SIZE, sizeof(struct wfs_inode));
+        token = strtok(NULL, "/");
+    }
+
+    printf("next inode %d \n", next_inode);
+
+    // next_inode will be the placeholder to place the data entry of this new file
+    int block_not_allocated = 0;
+    for(int i=0; i<N_BLOCKS; i++){
+        if(inode.blocks[i] != 0)
+            block_not_allocated = 1;
+    }
+    if(!block_not_allocated){
+        inode.blocks[0]  = find_free_dnode();
+        // WRITE back into inode area
+        memcpy((void*)(mmap_file + sb.i_blocks_ptr + BLOCK_SIZE * next_inode ), &inode, sizeof(struct wfs_inode));
+    }
+    printInode(&inode);
+
+    for(int b=0; b<(BLOCK_SIZE/sizeof(de));b++){
+        memcpy(&de, mmap_file + inode.blocks[0] + b *sizeof(de), sizeof(struct wfs_dentry));
+        printf("de.name : %s de.num : %d\n", de.name, de.num);
+        if(de.num == 0 && (strcmp(de.name, ".") != 0)){ // other entry other than "."
+            strcpy(de.name, strdup(file_name));
+            de.num = find_free_inode();
+            printf("Allocated de.name : %s de.num : %d\n", de.name, de.num);
+            memcpy((void*)(mmap_file + inode.blocks[0] + b *sizeof(de)), &de, sizeof(struct wfs_dentry));
+            
+            time_t current_time;
+            time(&current_time);
+
+            inode.num       = de.num;
+            inode.mode      = (mode_t) (S_IFREG | mode);            /* File type and mode */
+            inode.uid       = (uid_t) getuid();         /* User ID of owner */
+            inode.gid       = (gid_t) getgid();         /* Group ID of owner */
+            inode.size      = (off_t) 0;                /* Total size, in bytes */
+            inode.nlinks    = 1;                        /* Number of links */
+
+            inode.atim      = (time_t) current_time;               /* Time of last access */
+            inode.mtim      = (time_t) current_time;               /* Time of last modification */
+            inode.ctim      = (time_t) current_time;               /* Time of last status change */
+        
+            //inode.blocks[0]  = find_free_dnode();
+            for(int b=0;b<N_BLOCKS;b++) 
+                inode.blocks[b] = (off_t)0;
+
+            memcpy((void*)(mmap_file + sb.i_blocks_ptr + BLOCK_SIZE * de.num ), &inode, sizeof(struct wfs_inode));
+            break;
+        }
+    }
+    memcpy(&inode, mmap_file + sb.i_blocks_ptr + BLOCK_SIZE * de.num , sizeof(struct wfs_inode));
+    printInode(&inode);
+
+    printf("End of mknod\n");
+    munmap(mmap_file, st.st_size);
+    
+    return ret;
 
 }
 
@@ -248,10 +348,22 @@ static int wfs_mkdir(const char* path, mode_t mode) {
         memcpy(&inode, mmap_file + sb.i_blocks_ptr + next_inode*BLOCK_SIZE, sizeof(struct wfs_inode));
         token = strtok(NULL, "/");
     }
+
     printf("next inode %d \n", next_inode);
-    printInode(&inode);
 
     // next_inode will be the placeholder to place the data entry of this new file
+    int block_not_allocated = 0;
+    for(int i=0; i<N_BLOCKS; i++){
+        if(inode.blocks[i] != 0)
+            block_not_allocated = 1;
+    }
+    if(!block_not_allocated){
+        inode.blocks[0]  = find_free_dnode();
+        // WRITE back into inode area
+        memcpy((void*)(mmap_file + sb.i_blocks_ptr + BLOCK_SIZE * next_inode ), &inode, sizeof(struct wfs_inode));
+    }
+    printInode(&inode);
+
     for(int b=0; b<(BLOCK_SIZE/sizeof(de));b++){
         memcpy(&de, mmap_file + inode.blocks[0] + b *sizeof(de), sizeof(struct wfs_dentry));
         printf("de.name : %s de.num : %d\n", de.name, de.num);
@@ -275,8 +387,8 @@ static int wfs_mkdir(const char* path, mode_t mode) {
             inode.mtim      = (time_t) current_time;               /* Time of last modification */
             inode.ctim      = (time_t) current_time;               /* Time of last status change */
         
-            inode.blocks[0]  = find_free_dnode();
-            for(int b=1;b<N_BLOCKS;b++) 
+            //inode.blocks[0]  = find_free_dnode();
+            for(int b=0;b<N_BLOCKS;b++) 
                 inode.blocks[b] = (off_t)0;
 
             memcpy((void*)(mmap_file + sb.i_blocks_ptr + BLOCK_SIZE * de.num ), &inode, sizeof(struct wfs_inode));
@@ -357,6 +469,7 @@ static int wfs_read(const char *path, char *buf, size_t size, off_t offset, stru
 
     if(next_inode == -1) return size;
     int min_size = inode.size < size ? inode.size : size;
+
     memcpy(buf, mmap_file + inode.blocks[0],min_size);
 
     munmap(mmap_file, st.st_size);
