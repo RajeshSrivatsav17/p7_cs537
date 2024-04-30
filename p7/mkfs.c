@@ -84,14 +84,16 @@ void initializeInodes(){
     iNode.mode      = (mode_t) S_IFDIR | 0755;  /* File type and mode */
     iNode.uid       = (uid_t) getuid();         /* User ID of owner */
     iNode.gid       = (gid_t) getgid();         /* Group ID of owner */
-    iNode.size      = (off_t) 0;                /* Total size, in bytes */
+    iNode.size      = BLOCK_SIZE;                /* Total size, in bytes */
     iNode.nlinks    = 0;                        /* Number of links */
 
     iNode.atim      = (time_t) 0;               /* Time of last access */
     iNode.mtim      = (time_t) 0;               /* Time of last modification */
     iNode.ctim      = (time_t) 0;               /* Time of last status change */
     
-    for(int b=0;b<N_BLOCKS;b++) 
+    iNode.blocks[0] = (off_t) superBlock.d_blocks_ptr;
+
+    for(int b=1;b<N_BLOCKS;b++) 
         iNode.blocks[b] = (off_t)0;
 
     write(disk_file, &iNode, sizeof(struct wfs_inode));

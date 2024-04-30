@@ -21,28 +21,62 @@ int find_free_inode() {
     int fd = open(disk_img, O_RDWR);
     fstat(fd, &st);
     char * mmap_file = (char *) mmap(NULL, st.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
 
     memcpy(&sb, mmap_file, sizeof(struct wfs_sb));
 
     mmap_file = mmap_file + sb.i_bitmap_ptr;
 
-    for(int i=0; i<sb.num_inodes/8;i++){
-        memcpy(&inodeMap, mmap_file + i*sizeof(int), sizeof(int));
-        printf("inode bitmap = %x", inodeMap);
-        for (int j = (sizeof(int) * 8) - 1; j >= 0; j--) { // Start from the MSB
-            if (!(inodeMap & (1 << j))) { // Check if the j-th bit is zero
-                inode_num = i * sizeof(int) * 8 + (31-j); // Calculate the index of the zero bit
-                inodeMap |= 1<<j;
-                memcpy((void*)(mmap_file + i*sizeof(int)), &inodeMap, sizeof(inodeMap));
+    for (int i = 0; i < sb.num_inodes / 8; i++) {
+        memcpy(&inodeMap, mmap_file + i * sizeof(int), sizeof(int));
+        printf("inode bitmap = %x\n", inodeMap);
+        for (int j = 0; j < sizeof(int) * 8; j++) { 
+            if (!(inodeMap & (1 << j))) { 
+                inode_num = i * sizeof(int) * 8 + j; 
+                inodeMap |= 1 << j;
+                memcpy((void *)(mmap_file + i * sizeof(int)), &inodeMap, sizeof(inodeMap));
                 break;
             }
         }
-        if(inode_num != -1) break;
+        if (inode_num != -1) break;
     }
-
     munmap(mmap_file, st.st_size);
-    close(fd);
+    
     return inode_num;
+}
+
+int find_free_dnode() {
+    int dnode_num = -1;
+    struct stat st;
+    struct wfs_sb sb;
+    int dnodeMap;
+
+    int fd = open(disk_img, O_RDWR);
+    fstat(fd, &st);
+    char * mmap_file = (char *) mmap(NULL, st.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+
+    memcpy(&sb, mmap_file, sizeof(struct wfs_sb));
+
+    mmap_file = mmap_file + sb.d_bitmap_ptr;
+
+    for (int i = 0; i < sb.num_inodes / 8; i++) {
+        memcpy(&dnodeMap, mmap_file + i * sizeof(int), sizeof(int));
+        printf("dnodeMap bitmap = %x\n", dnodeMap);
+        for (int j = 0; j < sizeof(int) * 8; j++) { 
+            if (!(dnodeMap & (1 << j))) { 
+                dnode_num = i * sizeof(int) * 8 + j; 
+                dnodeMap |= 1 << j;
+                memcpy((void *)(mmap_file + i * sizeof(int)), &dnodeMap, sizeof(dnodeMap));
+                break;
+            }
+        }
+        if (dnode_num != -1) break;
+    }
+    munmap(mmap_file, st.st_size);
+    printf("dnode = %lx\n",  dnode_num*BLOCK_SIZE + sb.d_blocks_ptr);
+ 
+    return dnode_num*BLOCK_SIZE + sb.d_blocks_ptr;
 }
 
 void printInode(struct wfs_inode * inode){
@@ -59,6 +93,15 @@ void printInode(struct wfs_inode * inode){
     printf("\n");
 }
 
+void printSb(struct wfs_sb * sb) {
+    printf("num_inodes: %zu\n", sb->num_inodes);
+    printf("num_data_blocks: %zu\n", sb->num_data_blocks);
+    printf("i_bitmap_ptr: %llx\n", (long long) sb->i_bitmap_ptr);
+    printf("d_bitmap_ptr: %llx\n", (long long) sb->d_bitmap_ptr);
+    printf("i_blocks_ptr: %llx\n", (long long) sb->i_blocks_ptr);
+    printf("d_blocks_ptr: %llx\n", (long long) sb->d_blocks_ptr);
+}
+
 static int wfs_getattr(const char *path, struct stat *stbuf) {
     int ret = 0;
     struct stat st;
@@ -73,32 +116,41 @@ static int wfs_getattr(const char *path, struct stat *stbuf) {
     int fd = open(disk_img, O_RDONLY);
     fstat(fd, &st);
     mmap_file = (char *) mmap(NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+    close(fd);
+
     printf("File and Size : %s  %ld\n", disk_img, st.st_size);
 
     memcpy(&sb, mmap_file, sizeof(struct wfs_sb));
+    printSb(&sb);
+
     // we got the root inode. Now we have to get the data blocks of the root inode
+    // Root inode
+    memcpy(&inode, mmap_file + sb.i_blocks_ptr, sizeof(struct wfs_inode));
+    printInode(&inode);
+
     int found = 0;
     if(strcmp(path, "/") == 0) 
         // get attr for root dir
     {
-        memcpy(&inode, mmap_file + sb.i_blocks_ptr, sizeof(struct wfs_inode));
-
         stbuf->st_mode  = inode.mode;
         stbuf->st_gid   = inode.gid;
         stbuf->st_uid   = inode.uid;
         stbuf->st_nlink = inode.nlinks;
         stbuf->st_mtime = inode.mtim;
-
+        stbuf->st_ctime = inode.ctim;
+        stbuf->st_atime = inode.atim;
+        munmap(mmap_file, st.st_size);
+        
         return ret;
     }
     char *token = strtok(strdup(path), "/");
-    // printf("token is : %s\n", token);
+    printf("token is : %s\n", token);
 
     while (token != NULL) {
         // Traverse through the root inode and find out if there are any data block directory entry with the matching name
         found = 0;
-        memcpy(&inode, mmap_file + sb.i_blocks_ptr + next_inode*BLOCK_SIZE, sizeof(struct wfs_inode));
         for(int i=0; i<N_BLOCKS; i++){
+            if(inode.blocks[i] == 0) continue;
             for(int b=0; b<(BLOCK_SIZE/sizeof(de));b++){
                 memcpy(&de, mmap_file + inode.blocks[i] + b *sizeof(de), sizeof(struct wfs_dentry));
                 if(strcmp(de.name, token) == 0){
@@ -113,27 +165,32 @@ static int wfs_getattr(const char *path, struct stat *stbuf) {
             if(found ==1 ) break;
         }
         token = strtok(NULL, "/");
+        printf("token is : %s\n", token);
+        memcpy(&inode, mmap_file + sb.i_blocks_ptr + next_inode*BLOCK_SIZE, sizeof(struct wfs_inode));
     }
     // next_inode has all the stats needed
     if(!found) {
         munmap(mmap_file, st.st_size);
-        close(fd);
+        
         return -ENOENT;
     }
     memcpy(&inode, mmap_file + sb.i_blocks_ptr + next_inode*BLOCK_SIZE, sizeof(struct wfs_inode));
+    printInode(&inode);
 
     stbuf->st_mode  = inode.mode;
     stbuf->st_gid   = inode.gid;
     stbuf->st_uid   = inode.uid;
     stbuf->st_nlink = inode.nlinks;
     stbuf->st_mtime = inode.mtim;
+    stbuf->st_ctime = inode.ctim;
+    stbuf->st_atime = inode.atim;
     munmap(mmap_file, st.st_size);
-    close(fd);
+    
     return ret;
 }
 
 static int wfs_mknod(const char* path, mode_t mode, dev_t rdev) {
-    return 0;
+    return 5;
 
 }
 
@@ -164,7 +221,7 @@ static int wfs_mkdir(const char* path, mode_t mode) {
     int fd = open(disk_img, O_RDWR);
     fstat(fd, &st);
     mmap_file = (char *) mmap(NULL, st.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-
+    close(fd);
     memcpy(&sb, mmap_file, sizeof(struct wfs_sb));
     // we got the root inode. Now we have to get the data blocks of the root inode
 
@@ -173,7 +230,9 @@ static int wfs_mkdir(const char* path, mode_t mode) {
     while ((strcmp(token, dir_name) != 0) && (token != NULL)) {
         // Traverse through the root inode and find out if there are any data block directory entry with the matching name
         for(int b=0; b<(BLOCK_SIZE/sizeof(de));b++){
-            memcpy(&de, mmap_file + sb.d_blocks_ptr + BLOCK_SIZE * inode.blocks[0] + b *sizeof(de), sizeof(struct wfs_dentry));
+            memcpy(&de, mmap_file + inode.blocks[0] + b *sizeof(de), sizeof(struct wfs_dentry));
+            printf("de.name : %s de.num : %d\n", de.name, de.num);
+
             if(strcmp(de.name, token) == 0){
                 // inside next directory 
                 next_inode = de.num;
@@ -193,43 +252,47 @@ static int wfs_mkdir(const char* path, mode_t mode) {
         if(de.num == 0 && (strcmp(de.name, ".") != 0)){ // other entry other than "."
             strcpy(de.name, strdup(dir_name));
             de.num = find_free_inode();
-            // printf("de.name : %s de.num : %d\n", de.name, de.num);
-            memcpy((void*)(mmap_file + inode.blocks[0] + b *sizeof(de)), &de, sizeof(de));
+            printf("Allocated de.name : %s de.num : %d\n", de.name, de.num);
+            memcpy((void*)(mmap_file + inode.blocks[0] + b *sizeof(de)), &de, sizeof(struct wfs_dentry));
             
             time_t current_time;
             time(&current_time);
 
             inode.num       = de.num;
-            inode.mode      = (mode_t) mode;               /* File type and mode */
+            inode.mode      = (mode_t) (S_IFDIR | mode);            /* File type and mode */
             inode.uid       = (uid_t) getuid();         /* User ID of owner */
             inode.gid       = (gid_t) getgid();         /* Group ID of owner */
             inode.size      = (off_t) 0;                /* Total size, in bytes */
-            inode.nlinks    = 0;                        /* Number of links */
+            inode.nlinks    = 1;                        /* Number of links */
 
             inode.atim      = (time_t) current_time;               /* Time of last access */
             inode.mtim      = (time_t) current_time;               /* Time of last modification */
             inode.ctim      = (time_t) current_time;               /* Time of last status change */
-            memcpy((void*)(mmap_file + sb.i_blocks_ptr + BLOCK_SIZE * next_inode ), &inode, sizeof(inode));
+        
+            inode.blocks[0]  = find_free_dnode();
+            for(int b=1;b<N_BLOCKS;b++) 
+                inode.blocks[b] = (off_t)0;
+
+            memcpy((void*)(mmap_file + sb.i_blocks_ptr + BLOCK_SIZE * de.num ), &inode, sizeof(struct wfs_inode));
             break;
         }
     }
-    memcpy(&inode, mmap_file + sb.i_blocks_ptr + BLOCK_SIZE * next_inode , sizeof(inode));
+    memcpy(&inode, mmap_file + sb.i_blocks_ptr + BLOCK_SIZE * de.num , sizeof(struct wfs_inode));
     printInode(&inode);
 
     printf("End of mkdir\n");
     munmap(mmap_file, st.st_size);
-    close(fd);
+    
     return ret;
-
 }
 
 static int wfs_unlink(const char* path) {
-    return 0;
+    return 4;
 
 }
 
 static int wfs_rmdir(const char* path) {
-    return 0;
+    return 3;
 
 }
 
@@ -246,6 +309,8 @@ static int wfs_read(const char *path, char *buf, size_t size, off_t offset, stru
     int fd = open(disk_img, O_RDONLY);
     fstat(fd, &st);
     mmap_file = (char *) mmap(NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+    close(fd);
+
     printf("File and Size : %s  %ld\n", disk_img, st.st_size);
 
     memcpy(&sb, mmap_file, sizeof(struct wfs_sb));
@@ -278,28 +343,30 @@ static int wfs_read(const char *path, char *buf, size_t size, off_t offset, stru
     // next_inode has all the stats needed
     if(!found) {
         munmap(mmap_file, st.st_size);
-        close(fd);
+        
         return size;
     }
     memcpy(&inode, mmap_file + sb.i_blocks_ptr + next_inode*BLOCK_SIZE, sizeof(struct wfs_inode));
     printInode(&inode);
 
     if(next_inode == -1) return size;
-    memcpy(buf, mmap_file + inode.blocks[0], inode.size);
+    int min_size = inode.size < size ? inode.size : size;
+    memcpy(buf, mmap_file + inode.blocks[0],min_size);
 
-    printf("End of read %s %ld\n", buf, size);
     munmap(mmap_file, st.st_size);
-    close(fd);
+    
+    printf("End of read %s %ld\n", buf, size);
+
     return size;
 }
 
 static int wfs_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi) {
-    return 0;
+    return 2;
 
 }
 
 static int wfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info *fi) {
-    return 0;
+    return 1;
 
 }
 
