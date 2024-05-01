@@ -32,8 +32,9 @@ int find_free_inode() {
         printf("inode bitmap = %x\n", inodeMap);
         for (int j = (sizeof(int) * 8 )-1; j >0 ; j--) { 
             if (!(inodeMap & (1 << j))) { 
-                inode_num = i * sizeof(int) * 8 + (31-j); 
+                inode_num = i * sizeof(int) * 8 + j; 
                 inodeMap |= 1 << j;
+                printf("new inode bitmap = %x  i = %d\n", inodeMap, i);
                 memcpy((void *)(mmap_file + i * sizeof(int)), &inodeMap, sizeof(inodeMap));
                 break;
             }
@@ -65,7 +66,7 @@ int find_free_dnode() {
         printf("dnodeMap bitmap = %x\n", dnodeMap);
         for (int j = 0; j < sizeof(int) * 8; j++) { 
             if (!(dnodeMap & (1 << j))) { 
-                dnode_num = i * sizeof(int) * 8 + j; 
+                dnode_num = i * sizeof(int) * 8 + (31-j); 
                 dnodeMap |= 1 << j;
                 memcpy((void *)(mmap_file + i * sizeof(int)), &dnodeMap, sizeof(dnodeMap));
                 break;
@@ -91,6 +92,7 @@ void printInode(struct wfs_inode * inode){
         printf("%ld ", inode->blocks[i]);
     }
     printf("\n");
+
 }
 
 void printSb(struct wfs_sb * sb) {
@@ -127,7 +129,18 @@ static int wfs_getattr(const char *path, struct stat *stbuf) {
     // Root inode
     memcpy(&inode, mmap_file + sb.i_blocks_ptr, sizeof(struct wfs_inode));
     printInode(&inode);
-
+    printf("\nInode Map");
+    int inodeMap;
+    memcpy(&inodeMap, mmap_file + sb.i_bitmap_ptr, sizeof(int));
+    printf("inode map = %x \n", inodeMap);
+    printf("\nDnode Map");
+    int dnode;
+    memcpy(&dnode, mmap_file + sb.d_bitmap_ptr, sizeof(int));
+    printf("%x\n", dnode);
+    for(int b=0; b<(BLOCK_SIZE/sizeof(de));b++){
+        memcpy(&de, mmap_file + inode.blocks[0] + b *sizeof(de), sizeof(struct wfs_dentry));
+        printf("de.name : %s de.num : %d\n", de.name, de.num);
+    }
     int found = 0;
     if(strcmp(path, "/") == 0) 
         // get attr for root dir
@@ -487,7 +500,7 @@ static int wfs_write(const char *path, const char *buf, size_t size, off_t offse
     struct wfs_dentry de;
     int next_inode = 0;
     // int inode_num;
-    printf("my write path is : %s\n size = %ld offset = %ld", path, size, offset);
+    printf("my write path is : %s  buf = %s \n size = %ld offset = %ld", path, buf , size, offset);
     int fd = open(disk_img, O_RDWR);
     fstat(fd, &st);
     mmap_file = (char *) mmap(NULL, st.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
@@ -554,14 +567,13 @@ static int wfs_write(const char *path, const char *buf, size_t size, off_t offse
 
     int num_blocks = (size % BLOCK_SIZE) != 0? (size / BLOCK_SIZE)+1 : (size / BLOCK_SIZE);
     printf("num blocks %d\n", num_blocks);
+    printInode(&inode);
 
     for(int n=0; n<num_blocks;n++){
-        memcpy((void *)(mmap_file + inode.blocks[n]), &buf, size);
+        memcpy((void *)(mmap_file + inode.blocks[n]), buf, BLOCK_SIZE);
     }
 
     munmap(mmap_file, st.st_size);
-    
-    printf("End of write %s %ld\n", buf, size);
 
     return size;
 }
