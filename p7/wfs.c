@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <time.h>
+#include <math.h>
 
 char * disk_img;
 char * mnt_dir;
@@ -481,14 +482,39 @@ static int wfs_read(const char *path, char *buf, size_t size, off_t offset, stru
     printInode(&inode);
 
     if(next_inode == -1) return 0;
-    int min_size = inode.size < size ? inode.size : size;
+    // int min_size = inode.size < size ? inode.size : size;
 
-    memcpy(buf, mmap_file + inode.blocks[0],min_size);
+    // memcpy(buf, mmap_file + inode.blocks[0],min_size);
 
-    munmap(mmap_file, st.st_size);
+    // munmap(mmap_file, st.st_size);
     
-    printf("End of read %s %ld\n", buf, size);
+    // printf("End of read %s %ld\n", buf, size);
 
+    // have to read size number of bytes into buf and also use offset in read operation here 
+    int bytes_read = 0;
+    int current_block = offset/ BLOCK_SIZE;
+    while ((bytes_read < size) && (bytes_read < inode.size)) {
+        off_t block_offset;
+        if(current_block > D_BLOCK) { // find block offset
+            memcpy(&block_offset, (mmap_file + inode.blocks[IND_BLOCK] + sizeof(int)/*num_indirect_blocks*/ + sizeof(off_t)*(current_block-D_BLOCK-1)),  sizeof(off_t));
+        }
+        else{
+            block_offset = inode.blocks[current_block];
+        }
+        printf("bytes_read : %d block_offset : %ld current block = %d \n",bytes_read, block_offset, current_block);
+
+        int bytes_to_read = inode.size < (size - bytes_read) ? inode.size : (size - bytes_read);
+        int mem_cpy_size = bytes_to_read < BLOCK_SIZE ? bytes_to_read : BLOCK_SIZE;
+        // Copy data from buffer to allocated block
+        memcpy(buf + bytes_read, (void *)(mmap_file + block_offset), mem_cpy_size);
+
+        // Update bytes written
+        bytes_read += mem_cpy_size;
+        block_offset = 0;
+        current_block++;
+    }
+    // printf("buf %s\n", buf);
+    munmap(mmap_file, st.st_size);
     return size;
 }
 
@@ -548,29 +574,81 @@ static int wfs_write(const char *path, const char *buf, size_t size, off_t offse
     // Now we have to see if the data block is allocated. 
     // How to do that? 
     //  if the size allocated < offset - if yes, then we need to allocate a block in that region
-    int tmp_offset = offset+size;
+    int total_reqd_space = offset+size;
+    // int block_index = offset/BLOCK_SIZE; // to see where to start from
+    int num_blocks_to_be_allocated = 0;
+    if(inode.size >= total_reqd_space) num_blocks_to_be_allocated = 0; 
+    else {
+        num_blocks_to_be_allocated = ((total_reqd_space-inode.size)%BLOCK_SIZE) ==0 ? (total_reqd_space-inode.size)/BLOCK_SIZE : (total_reqd_space-inode.size)/BLOCK_SIZE +1;
+    }
     int block_index = 0;
+    printf("num blocks %d total space reqd = %d inode size = %ld\n", num_blocks_to_be_allocated, total_reqd_space, inode.size);
 
-    while(tmp_offset > inode.size) {
+    while(num_blocks_to_be_allocated>0) {
+        if(block_index <= D_BLOCK) {
+            if(inode.blocks[block_index] != 0) {
+                block_index++;
+                continue;
+            }
+            else{
+                inode.blocks[block_index] = find_free_dnode();
+                inode.size += BLOCK_SIZE;
+                num_blocks_to_be_allocated--;
+
+                printf("new block allocated : %ld , num_blocks_to_be_allocated = %d, block_index = %d \n",inode.blocks[block_index], num_blocks_to_be_allocated, block_index);
+                block_index++;
+            }
+        }
         // Need to allocate a block 
         // for now allocate the first block .later modify this logic such taht we allocate the nth block based on the offset / BLOCKSIZE value
         // if(b>DIRECT_BLOCK) put it in indirect block
-        inode.blocks[block_index] = find_free_dnode();
-        inode.size += BLOCK_SIZE;
+        //if(block_index > D_BLOCK) { // Time to insert indirect blocks
+        else{
+            off_t new_block_offset;
+            int num_indirect_blocks = 0; // Specifies how many current indirect blocks are present
+            if(inode.blocks[IND_BLOCK] == 0)
+                inode.blocks[IND_BLOCK] = find_free_dnode();
+            new_block_offset = find_free_dnode();
+
+            // Increment number of indirect blocks
+            memcpy(&num_indirect_blocks, (mmap_file + inode.blocks[IND_BLOCK]), sizeof(int));
+            num_indirect_blocks++;
+            memcpy((void*)(mmap_file + inode.blocks[IND_BLOCK]), &num_indirect_blocks,  sizeof(int));
+            num_blocks_to_be_allocated--;
+            // write back the block offset of the new indirect block
+            memcpy((void*)(mmap_file+ inode.blocks[IND_BLOCK] + sizeof(int)/*num_indirect_blocks*/ + sizeof(off_t)*(num_indirect_blocks-1)), &new_block_offset, sizeof(off_t));
+            printf("new block allocated : %ld , num_blocks_to_be_allocated = %d, block_index = %d \n",new_block_offset, num_blocks_to_be_allocated, num_indirect_blocks);
+            inode.size += BLOCK_SIZE;
+        }
         printf("dnode %lx size %ld\n",inode.blocks[block_index], inode.size);
 
         memcpy((void*)(mmap_file + sb.i_blocks_ptr + BLOCK_SIZE * inode.num ), &inode, sizeof(struct wfs_inode));
 
-        tmp_offset -= BLOCK_SIZE;
-        block_index++;
     }
 
-    int num_blocks = (size % BLOCK_SIZE) != 0? (size / BLOCK_SIZE)+1 : (size / BLOCK_SIZE);
-    printf("num blocks %d\n", num_blocks);
     printInode(&inode);
 
-    for(int n=0; n<num_blocks;n++){
-        memcpy((void *)(mmap_file + inode.blocks[n]), buf, BLOCK_SIZE);
+    int bytes_written = 0;
+    int current_block = offset/ BLOCK_SIZE;
+    while (bytes_written < size) {
+        off_t block_offset;
+        if(current_block > D_BLOCK) { // find block offset
+            memcpy(&block_offset, (mmap_file + inode.blocks[IND_BLOCK] + sizeof(int)/*num_indirect_blocks*/ + sizeof(off_t)*(current_block-D_BLOCK-1)),  sizeof(off_t));
+        }
+        else{
+            block_offset = inode.blocks[current_block];
+        }
+        printf("Bytes written : %d block_offset : %ld current block = %d \n",bytes_written, block_offset, current_block);
+
+        int bytes_to_write = size - bytes_written;
+        int mem_cpy_size = bytes_to_write < BLOCK_SIZE ? bytes_to_write : BLOCK_SIZE;
+        // Copy data from buffer to allocated block
+        memcpy((void *)(mmap_file + block_offset), buf + bytes_written, mem_cpy_size);
+
+        // Update bytes written
+        bytes_written += BLOCK_SIZE;
+        block_offset = 0;
+        current_block++;
     }
 
     munmap(mmap_file, st.st_size);
