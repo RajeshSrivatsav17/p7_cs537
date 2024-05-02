@@ -738,6 +738,7 @@ static int wfs_write(const char *path, const char *buf, size_t size, off_t offse
 
     int bytes_written = 0;
     int current_block = offset/ BLOCK_SIZE;
+    off_t offset_inside_block = offset%BLOCK_SIZE;
     while (bytes_written < size) {
         off_t block_offset;
         if(current_block > D_BLOCK) { // find block offset
@@ -748,14 +749,15 @@ static int wfs_write(const char *path, const char *buf, size_t size, off_t offse
         }
         printf("Bytes written : %d block_offset : %ld current block = %d \n",bytes_written, block_offset, current_block);
 
-        int bytes_to_write = size - bytes_written;
+        int bytes_to_write = (size - offset_inside_block) - bytes_written;
         int mem_cpy_size = bytes_to_write < BLOCK_SIZE ? bytes_to_write : BLOCK_SIZE;
         // Copy data from buffer to allocated block
-        memcpy((void *)(mmap_file + block_offset), buf + bytes_written, mem_cpy_size);
+        memcpy((void *)(mmap_file + block_offset + offset_inside_block), buf + bytes_written, mem_cpy_size);
 
         // Update bytes written
-        bytes_written += BLOCK_SIZE;
+        bytes_written += mem_cpy_size;
         block_offset = 0;
+        offset_inside_block = 0;
         current_block++;
     }
 
