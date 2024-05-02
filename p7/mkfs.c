@@ -119,13 +119,13 @@ void initializeInodes(){
     }
 }
 
-void initializeRootDataBlock() {
-    struct wfs_dentry de;
-    strcpy(de.name,".");
-    de.num = 0;
-    lseek(disk_file, superBlock.d_blocks_ptr, SEEK_SET);
-    write(disk_file, &de, sizeof(struct wfs_dentry));
-}
+// void initializeRootDataBlock() {
+//     struct wfs_dentry de;
+//     strcpy(de.name,".");
+//     de.num = 0;
+//     lseek(disk_file, superBlock.d_blocks_ptr, SEEK_SET);
+//     write(disk_file, &de, sizeof(struct wfs_dentry));
+// }
 
 int main(int argc, char *argv[]) {
 
@@ -135,7 +135,7 @@ int main(int argc, char *argv[]) {
     createSuperBlock();
     initializeBitMaps();
     initializeInodes();
-    initializeRootDataBlock();
+    // initializeRootDataBlock();
     close(disk_file);
     return 0;
 }
