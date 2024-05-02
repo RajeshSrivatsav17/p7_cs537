@@ -2,6 +2,7 @@
 #include <fuse.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdbool.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <sys/mman.h>
@@ -13,6 +14,71 @@
 
 char * disk_img;
 char * mnt_dir;
+
+void deallocate_inode(int inode_num){//given an inode number, deallocates it completely removing any data blocks allocated to it 
+    struct stat st;
+    struct wfs_sb sb;
+    int fd = open(disk_img, O_RDWR);
+    fstat(fd, &st);
+    char * mmap_file = (char *) mmap(NULL, st.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+    //copy over the superblock information and update it
+    memcpy(&sb, mmap_file, sizeof(struct wfs_sb));
+    //copy over the inode information
+    struct wfs_inode inode;
+    memcpy(&inode, mmap_file + sb.i_blocks_ptr + inode_num*BLOCK_SIZE, sizeof(struct wfs_inode));
+    printInode(&inode);
+
+
+    
+    int inodeMap; 
+    memcpy(&inodeMap, mmap_file + sb.i_bitmap_ptr + sizeof(int) * (inode_num / (8 * sizeof(int))), sizeof(int)); //get the inode bitmap
+    printf("the inode bitmap before updating: %x\n", inodeMap);
+
+    inodeMap &= ~(1 << ((sizeof(int) * 8) - 1 - (inode_num % (8 * sizeof(int))))); //clears the inode_num index (from L->R is the index count)
+
+    memcpy(mmap_file + sb.i_bitmap_ptr + sizeof(int) * (inode_num / (8 * sizeof(int))), &inodeMap, sizeof(int)); //replace the inode bitmap
+    printf("the inode bitmap after updating: %x\n", inodeMap);
+    
+    //now update the data_bitmap to free all the data blocks allocated to this inode
+    for(int b = 0; b < N_BLOCKS; b++){
+        off_t data_block_address = inode.blocks[b];
+            if(data_block_address != 0){//meaning the block has been allocated
+                printf("block_num: %d, data_block_address: %lu\n", b, data_block_address);
+                int data_block_num = (data_block_address - sb.d_blocks_ptr)/BLOCK_SIZE;
+                printf("data_block_num: %d\n", data_block_num);
+                int dataMap = mmap_file[sb.d_bitmap_ptr + sizeof(int) * (data_block_num / (8 * sizeof(int)))];
+                dataMap &= ~(1 << (data_block_num % (8 * sizeof(int)))); //change
+                mmap_file[sb.d_bitmap_ptr + sizeof(int) * (data_block_num / (8 * sizeof(int)))] = dataMap;
+            } 
+    }
+
+    printf("Reaches here now\n");
+
+    /*
+    //remove the blocks the indirect block points to
+    int num_data_blocks_in_indirect_block = mmap_file[inode.blocks[N_BLOCKS-1]]; //num of data blocks inside the indirect block
+    if(num_data_blocks_in_indirect_block)
+    for(int b = 0; b < num_data_blocks_in_indirect_block; b++){
+        off_t data_block_address;
+        memcpy(&data_block_address, mmap_file + inode.blocks[N_BLOCKS-1] + sizeof(int) + b*sizeof(off_t), sizeof(off_t));
+        int data_block_num = (data_block_address - sb.d_blocks_ptr)/BLOCK_SIZE;
+        int dataMap = mmap_file[sb.d_bitmap_ptr + sizeof(int) * (data_block_num / (8 * sizeof(int)))];
+        dataMap &= ~(1 << (data_block_num % (8 * sizeof(int))));
+        mmap_file[sb.d_bitmap_ptr + sizeof(int) * (data_block_num / (8 * sizeof(int)))] = dataMap; 
+    }
+    */
+    munmap(mmap_file, st.st_size);
+
+    
+}
+
+
+
+
+
+
+
 int find_free_inode() {
     int inode_num = -1;
     struct stat st;
@@ -33,7 +99,7 @@ int find_free_inode() {
         printf("inode bitmap = %x\n", inodeMap);
         for (int j = (sizeof(int) * 8 )-1; j >0 ; j--) { 
             if (!(inodeMap & (1 << j))) { 
-                inode_num = i * sizeof(int) * 8 + j; 
+                inode_num = i * sizeof(int) * 8 + 31 - j; 
                 inodeMap |= 1 << j;
                 printf("new inode bitmap = %x  i = %d\n", inodeMap, i);
                 memcpy((void *)(mmap_file + i * sizeof(int)), &inodeMap, sizeof(inodeMap));
@@ -527,12 +593,83 @@ static int wfs_mkdir(const char* path, mode_t mode) {
 }
 
 static int wfs_unlink(const char* path) {
-    return 4;
+    printf("Starting unlink to file with path: %s\n", path);
+    char* path_copy = strdup(path); //tokenize the string using this copy; remember to free before leaving
+    char* last_token = strrchr(path, '/');
+    size_t length = strlen(last_token + 1);
+    char* file_name = (char*)malloc(length + 1);
+    strcpy(file_name, last_token + 1);
+    printf("Unlinking file: %s\n", file_name);
+    //file_name has the file name I want to search for in the FS. Errors in the path_name will be taken care of earlier.
+    struct stat st; //to hold how much to mmap among other things
+    int fd = open(disk_img, O_RDWR);
+    fstat(fd, &st);
 
+    //mmap the disk_img and copy over the superblock
+    char* mmap_file = (char*) mmap(NULL, st.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+    struct wfs_sb sb;
+    memcpy(&sb, mmap_file, sizeof(struct wfs_sb));
+    printf("Reaches here - b\n");
+    printf("path_copy: %s\n", path_copy);
+
+    int inode_num = 0; //root inode in the beginning
+    char* token  = strtok(path_copy, "/");
+    
+    while(token != NULL){
+        bool inode_found = false;
+        printf("Searching for token: %s\n", token);
+        struct wfs_inode inode;
+        memcpy(&inode, mmap_file + sb.i_blocks_ptr + inode_num*BLOCK_SIZE, sizeof(struct wfs_inode)); //inode is the root inode in the beginning
+        printInode(&inode); //print the inode you're working with now
+        for(int block_num = 0; block_num < N_BLOCKS - 1; block_num++){//since it the directory we're working with, there's no indirect block use
+            printf("block_num: %d\n", block_num);
+            if(inode.blocks[block_num] == 0){//reached the end of the allocated data blocks for this inode
+                continue;
+            }
+            for(off_t dir_block_address = inode.blocks[block_num]; dir_block_address < inode.blocks[block_num] + BLOCK_SIZE; dir_block_address += sizeof(struct wfs_dentry)){
+                printf("block_num: %d, dir_block_address: %lu\n", block_num, dir_block_address);
+                struct wfs_dentry de;
+                memcpy(&de, mmap_file + dir_block_address, sizeof(struct wfs_dentry));
+                printf("Directory entry: de.name = %s, de.num = %d\n", de.name, de.num);
+                if(strcmp(de.name, token) == 0){
+                    inode_found = true;
+                    inode_num = de.num; //new child to search for
+                    if(strcmp(de.name, file_name) == 0){//this entry is the file, memset it to 0;
+                        memset(mmap_file + dir_block_address, 0, sizeof(struct wfs_dentry)); //erases the directory entry
+                        printf("Directory entry for dir_block_address %lu erased\n", dir_block_address);
+                        //child_inode_num has the file 
+                        struct wfs_inode file_inode;
+                        memcpy(&file_inode, mmap_file + sb.i_blocks_ptr + inode_num*BLOCK_SIZE, sizeof(struct wfs_inode));
+                        printInode(&file_inode);
+                        file_inode.nlinks--;
+                        if(file_inode.nlinks == 0){//if there no longer any hard links to this file, remove this file completely, i.e, deallocate this inode and delete whatever data blocks were assigned to it
+                            printf("Calling deallocate_inode() with inode_num: %d\n", inode_num);
+                            deallocate_inode(inode_num); //everything has been deallocated 
+                        }
+                        else{
+                            memcpy(mmap_file + sb.i_blocks_ptr + inode_num*BLOCK_SIZE, &file_inode, sizeof(struct wfs_inode)); //copy over the updated inode
+                        }    
+                    }
+                    break;
+                }    
+            }
+            if(inode_found){
+                break;
+            }
+        }
+        token = strtok(NULL, "/"); //next token to search for after finding the inode
+    }
+    
+    printf("Reaches here - c\n");
+    free(path_copy);
+    free(file_name);
+    munmap(mmap_file, st.st_size);
+    return 0;
 }
 
 static int wfs_rmdir(const char* path) {
-    return 3;
+    return 0;
 
 }
 

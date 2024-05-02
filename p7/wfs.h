@@ -57,3 +57,6 @@ struct wfs_dentry {
     char name[MAX_NAME];
     int num;
 };
+
+void printInode(struct wfs_inode * inode);
+void printSb(struct wfs_sb * sb);
