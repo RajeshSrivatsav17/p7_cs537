@@ -28,8 +28,6 @@ void deallocate_inode(int inode_num){//given an inode number, deallocates it com
     struct wfs_inode inode;
     memcpy(&inode, mmap_file + sb.i_blocks_ptr + inode_num*BLOCK_SIZE, sizeof(struct wfs_inode));
     printInode(&inode);
-
-
     
     int inodeMap; 
     memcpy(&inodeMap, mmap_file + sb.i_bitmap_ptr + sizeof(int) * (inode_num / (8 * sizeof(int))), sizeof(int)); //get the inode bitmap
@@ -74,11 +72,6 @@ void deallocate_inode(int inode_num){//given an inode number, deallocates it com
 }
 
 
-
-
-
-
-
 int find_free_inode() {
     int inode_num = -1;
     struct stat st;
@@ -97,7 +90,7 @@ int find_free_inode() {
     for (int i = 0; i < sb.num_inodes / 8; i++) {
         memcpy(&inodeMap, mmap_file + i * sizeof(int), sizeof(int));
         printf("inode bitmap = %x\n", inodeMap);
-        for (int j = (sizeof(int) * 8 )-1; j >0 ; j--) { 
+        for (int j = (sizeof(int) * 8 )-1; j >= 0 ; j--) { 
             if (!(inodeMap & (1 << j))) { 
                 inode_num = i * sizeof(int) * 8 + 31 - j; 
                 inodeMap |= 1 << j;
