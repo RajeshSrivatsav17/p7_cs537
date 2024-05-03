@@ -11,8 +11,9 @@
 #include <unistd.h>
 #include <time.h>
 #include <math.h>
+
 #ifdef ENABLE_PRINTF
-    #define PRINTF(...) printf(__VA_ARGS__)
+    #define PRINTF(...) PRINTF(__VA_ARGS__)
 #else
     #define PRINTF(...) 
 #endif
@@ -32,7 +33,7 @@ void deallocate_inode(int inode_num){//given an inode number, deallocates it com
     //copy over the inode information
     struct wfs_inode inode;
     memcpy(&inode, mmap_file + sb.i_blocks_ptr + inode_num*BLOCK_SIZE, sizeof(struct wfs_inode));
-    //printInode(&inode);
+    printInode(&inode);
     
     int inodeMap; 
     memcpy(&inodeMap, mmap_file + sb.i_bitmap_ptr + sizeof(int) * (inode_num / (8 * sizeof(int))), sizeof(int)); //get the inode bitmap
@@ -50,27 +51,48 @@ void deallocate_inode(int inode_num){//given an inode number, deallocates it com
                 PRINTF("block_num: %d, data_block_address: %lu\n", b, data_block_address);
                 int data_block_num = (data_block_address - sb.d_blocks_ptr)/BLOCK_SIZE;
                 PRINTF("data_block_num: %d\n", data_block_num);
-                int dataMap = mmap_file[sb.d_bitmap_ptr + sizeof(int) * (data_block_num / (8 * sizeof(int)))];
-                dataMap &= ~(1 << (data_block_num % (8 * sizeof(int)))); //change
-                mmap_file[sb.d_bitmap_ptr + sizeof(int) * (data_block_num / (8 * sizeof(int)))] = dataMap;
+                int dataMap;
+                memcpy(&dataMap, mmap_file + sb.d_bitmap_ptr + sizeof(int) * (data_block_num / (8 * sizeof(int))), sizeof(int));
+                PRINTF("the data bitmaps before updating:\n");
+                for(int i = 0; i < sb.num_data_blocks/(8 * sizeof(int)); i++){
+                    int dataMap;
+                    memcpy(&dataMap, mmap_file + sb.d_bitmap_ptr + (sizeof(int) * i), sizeof(int));
+                    PRINTF("%x ", dataMap);
+                }
+                PRINTF("\n");
+                dataMap &= ~(1 << (8*(sizeof(int)) - 1 - (data_block_num % (8 * sizeof(int))))); //change
+
+                memcpy(mmap_file + sb.d_bitmap_ptr + sizeof(int) * (data_block_num / (8 * sizeof(int))), &dataMap, sizeof(int));
+                PRINTF("the data bitmaps after updating:\n");
+                for(int i = 0; i < sb.num_data_blocks/(8 * sizeof(int)); i++){
+                    int dataMap;
+                    memcpy(&dataMap, mmap_file + sb.d_bitmap_ptr + (sizeof(int) * i), sizeof(int));
+                    PRINTF("%x ", dataMap);
+                }
+                PRINTF("\n");
             } 
     }
 
-    PRINTF("Reaches here now\n");
+    
 
-    /*
+    
     //remove the blocks the indirect block points to
-    int num_data_blocks_in_indirect_block = mmap_file[inode.blocks[N_BLOCKS-1]]; //num of data blocks inside the indirect block
-    if(num_data_blocks_in_indirect_block)
-    for(int b = 0; b < num_data_blocks_in_indirect_block; b++){
-        off_t data_block_address;
-        memcpy(&data_block_address, mmap_file + inode.blocks[N_BLOCKS-1] + sizeof(int) + b*sizeof(off_t), sizeof(off_t));
-        int data_block_num = (data_block_address - sb.d_blocks_ptr)/BLOCK_SIZE;
-        int dataMap = mmap_file[sb.d_bitmap_ptr + sizeof(int) * (data_block_num / (8 * sizeof(int)))];
-        dataMap &= ~(1 << (data_block_num % (8 * sizeof(int))));
-        mmap_file[sb.d_bitmap_ptr + sizeof(int) * (data_block_num / (8 * sizeof(int)))] = dataMap; 
+    if(inode.blocks[N_BLOCKS-1] != 0){//ONLY IF THERE IS AN INDIRECT BLOCK
+        int num_data_blocks_in_indirect_block = mmap_file[inode.blocks[N_BLOCKS-1]]; //num of data blocks inside the indirect block
+        PRINTF("num_data_blocks_in_indirect_block: %d\n", num_data_blocks_in_indirect_block);
+        PRINTF("Reaches here now\n");
+        for(int b = 0; b < num_data_blocks_in_indirect_block; b++){
+            off_t data_block_address;
+            memcpy(&data_block_address, mmap_file + inode.blocks[N_BLOCKS-1] + sizeof(int) + b*sizeof(off_t), sizeof(off_t));
+            int data_block_num = (data_block_address - sb.d_blocks_ptr)/BLOCK_SIZE;
+            int dataMap;
+            memcpy(&dataMap, mmap_file + sb.d_bitmap_ptr + sizeof(int) * (data_block_num / (8 * sizeof(int))), sizeof(int));
+            PRINTF("the data bitmap before updating: %x\n", dataMap);
+            dataMap &= ~(1 << (8*(sizeof(int)) - 1 - (data_block_num % (8 * sizeof(int))))); //change
+            PRINTF("the data bitmap after updating: %x\n", dataMap);
+            memcpy(mmap_file + sb.d_bitmap_ptr + sizeof(int) * (data_block_num / (8 * sizeof(int))), &dataMap, sizeof(int));
+        }
     }
-    */
     munmap(mmap_file, st.st_size);
 
     
@@ -131,7 +153,7 @@ int find_free_dnode() {
         PRINTF("dnodeMap bitmap = %x\n", dnodeMap);
         for (int j = 0; j < sizeof(int) * 8; j++) { 
             if (!(dnodeMap & (1 << j))) { 
-                dnode_num = i * sizeof(int) * 8 + ((8*sizeof(int))-1-j); 
+                dnode_num = i * sizeof(int) * 8 + ((8*sizeof(int))- 1 - j); 
                 dnodeMap |= 1 << j;
                 memcpy((void *)(mmap_file + i * sizeof(int)), &dnodeMap, sizeof(dnodeMap));
                 break;
@@ -679,6 +701,69 @@ static int wfs_unlink(const char* path) {
 }
 
 static int wfs_rmdir(const char* path) {
+    PRINTF("Starting rmdir with path: %s\n", path);
+    char* path_copy = strdup(path); //tokenize the string using this copy; remember to free before leaving
+    char* last_token = strrchr(path, '/');
+    size_t length = strlen(last_token + 1);
+    char* dir_name = (char*)malloc(length + 1);
+    strcpy(dir_name, last_token + 1);
+    PRINTF("Removing dir: %s\n", dir_name);
+    //file_name has the file name I want to search for in the FS. Errors in the path_name will be taken care of earlier.
+    struct stat st; //to hold how much to mmap among other things
+    int fd = open(disk_img, O_RDWR);
+    fstat(fd, &st);
+
+    //mmap the disk_img and copy over the superblock
+    char* mmap_file = (char*) mmap(NULL, st.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+    struct wfs_sb sb;
+    memcpy(&sb, mmap_file, sizeof(struct wfs_sb));
+    
+
+    int inode_num = 0; //root inode in the beginning
+    char* token  = strtok(path_copy, "/");
+
+    while(token != NULL){
+        bool inode_found = false;
+        PRINTF("Searching for token: %s\n", token);
+        struct wfs_inode inode;
+        memcpy(&inode, mmap_file + sb.i_blocks_ptr + inode_num*BLOCK_SIZE, sizeof(struct wfs_inode)); //this is the root inode in the beginning
+        for(int block_num = 0; block_num < N_BLOCKS - 1; block_num++){//since it the directory we're working with, there's no indirect block use
+            PRINTF("block_num: %d\n", block_num);
+            if(inode.blocks[block_num] == 0){//only search allocated data blocks for this inode
+                continue;
+            }
+            for(off_t dir_block_address = inode.blocks[block_num]; dir_block_address < inode.blocks[block_num] + BLOCK_SIZE; dir_block_address += sizeof(struct wfs_dentry)){
+                PRINTF("block_num: %d, dir_block_address: %lu\n", block_num, dir_block_address);
+                struct wfs_dentry de;
+                memcpy(&de, mmap_file + dir_block_address, sizeof(struct wfs_dentry));
+                PRINTF("Directory entry: de.name = %s, de.num = %d\n", de.name, de.num);
+                if(strcmp(de.name, token) == 0){
+                    inode_found = true;
+                    inode_num = de.num; //new child to search for
+                    if(strcmp(de.name, dir_name) == 0){//this entry is the file, memset it to 0;
+                        memset(mmap_file + dir_block_address, 0, sizeof(struct wfs_dentry)); //erases the directory entry
+                        PRINTF("Directory entry for dir_block_address %lu erased\n", dir_block_address);
+                        //child_inode_num has the file 
+                        struct wfs_inode dir_inode;
+                        memcpy(&dir_inode, mmap_file + sb.i_blocks_ptr + inode_num*BLOCK_SIZE, sizeof(struct wfs_inode));
+                        //printInode(&file_inode);
+                        deallocate_inode(inode_num); //everything has been deallocated 
+                    }
+                    break;
+                }    
+            }
+            if(inode_found){
+                break;
+            }
+        }
+        token = strtok(NULL, "/"); //next token to search for after finding the inode
+    }
+
+    free(path_copy);
+    free(dir_name);
+    munmap(mmap_file, st.st_size);
+
     return 0;
 
 }
